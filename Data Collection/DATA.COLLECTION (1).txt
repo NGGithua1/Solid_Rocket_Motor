@@ -1,0 +1,139 @@
+import serial
+import time
+import csv
+import threading
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+
+# Serial port configuration
+port = 'COM12'  # Change this to match your port
+baudrate = 115200  # Adjust if necessary
+
+# Initialize CSV file in append mode
+csv_file = open('drag_force.csv', mode='a', newline='')
+csv_writer = csv.writer(csv_file)
+
+# Check if the file is empty and write the header if needed
+if csv_file.tell() == 0:
+    csv_writer.writerow(['Time', 'Drag Force'])
+    csv_file.flush()
+
+# Initialize real-time plot
+plt.style.use('ggplot')
+fig, ax = plt.subplots(figsize=(8, 5))
+time_data, force_data = [], []
+line, = ax.plot([], [], 'r-', linewidth=2, label='Drag Force')
+
+ax.set_xlabel('Time (ms)', fontsize=12)
+ax.set_ylabel('Drag Force (N)', fontsize=12)
+ax.set_title('Real-Time Drag Force Measurement', fontsize=14)
+ax.legend()
+ax.grid(True, linestyle='--', alpha=0.6)
+
+last_time = None  # Store the last known time before disconnection
+
+
+# Function to establish a connection to the serial port
+def connect_serial():
+    global last_time, time_data, force_data
+    while True:
+        try:
+            ser = serial.Serial(port, baudrate, timeout=1)
+            print("Connected to", port)
+
+            # Reset data buffers to prevent overlap
+            time_data.clear()
+            force_data.clear()
+
+            return ser
+        except serial.SerialException:
+            print("Waiting for device...")
+            time.sleep(2)
+
+
+ser = connect_serial()  # Start with an active connection
+
+
+# Function to send tare command when "t" is pressed
+def send_tare():
+    global ser
+    while True:
+        command = input().strip().lower()
+        if command == "t":
+            try:
+                ser.write(b't\n')  # Send "t" to Arduino
+                print("Tare command sent!")
+            except serial.SerialException:
+                print("Failed to send tare command. Serial connection lost.")
+
+
+# Start tare input listener in a separate thread
+tare_thread = threading.Thread(target=send_tare, daemon=True)
+tare_thread.start()
+
+
+# Function to update the plot dynamically
+def update(frame):
+    global time_data, force_data, ser, last_time
+
+    try:
+        if ser.in_waiting > 0:
+            line_data = ser.readline().decode('utf-8').strip()
+
+            if line_data:
+                try:
+                    time_val, force_val = map(float, line_data.split(', '))
+
+                    # If this is the first reading after reconnection, adjust time reference
+                    if last_time is not None and time_val < last_time:
+                        print("Time reset detected, adjusting...")
+                        time_data.clear()
+                        force_data.clear()
+
+                    last_time = time_val  # Update last known time
+
+                    # Print values like Arduino Serial Monitor
+                    print(f"Time: {int(time_val)}, Drag Force: {force_val:.2f}")
+
+                    # Store in CSV file and force save
+                    csv_writer.writerow([int(time_val), force_val])
+                    csv_file.flush()  # Flush buffer to ensure data is saved
+
+                    # Update data lists
+                    time_data.append(int(time_val))
+                    force_data.append(force_val)
+
+                    # Keep only the last 100 data points for a live effect
+                    if len(time_data) > 100:
+                        time_data.pop(0)
+                        force_data.pop(0)
+
+                    # Update the graph
+                    line.set_xdata(time_data)
+                    line.set_ydata(force_data)
+                    ax.relim()
+                    ax.autoscale_view()
+
+                    # Update title dynamically
+                    ax.set_title(f"Real-Time Drag Force: {force_val:.2f} N", fontsize=14)
+
+                except ValueError:
+                    pass  # Ignore lines that don't contain valid data
+
+    except serial.SerialException:
+        print("Serial connection lost. Attempting to reconnect...")
+        ser.close()
+        ser = connect_serial()  # Reconnect
+
+
+# Use FuncAnimation for smooth updates
+ani = animation.FuncAnimation(fig, update, interval=0.001)  # Matches 0.0125s update rate
+
+try:
+    plt.show()
+except KeyboardInterrupt:
+    print("Data collection stopped.")
+
+finally:
+    ser.close()
+    csv_file.close()
